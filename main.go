@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io/ioutil"
@@ -54,6 +55,7 @@ type options struct {
 	noThirdParty     bool
 	overwrite        bool
 	skipSaveResponse bool
+	scrapeLinks      bool
 	output           string
 	concurrency      int
 	delay            int
@@ -70,6 +72,8 @@ func main() {
 
 	flag.Var(&opts.excludes, "exclude", "")
 	flag.Var(&opts.excludes, "e", "")
+
+	flag.BoolVar(&opts.scrapeLinks, "scrape", false, "")
 
 	flag.BoolVar(&opts.skipSaveResponse, "skip-save-response", false, "")
 	flag.BoolVar(&opts.skipSaveResponse, "s", false, "")
@@ -147,6 +151,7 @@ func main() {
 	for i := 0; i < opts.concurrency; i++ {
 		wg.Add(1)
 		go func() {
+			defer wg.Done()
 			for requestURL := range jobs {
 
 				ctx, cancel := context.WithTimeout(pctx, time.Second*10)
@@ -161,16 +166,50 @@ func main() {
 					jsCode = "false"
 				}
 
+				hrefCode := "false"
+				if opts.scrapeLinks {
+					hrefCode = "JSON.stringify([...document.querySelectorAll('a')].map(n => n.href))"
+				}
+
+				actionCode := "false"
+				if opts.scrapeLinks {
+					actionCode = "JSON.stringify([...document.querySelectorAll('form')].map(n => n.action))"
+				}
+
 				var jsOutput interface{}
+				var hrefOutput interface{}
+				var actionOutput interface{}
 				err := chromedp.Run(
 					ctx,
 					fetch.Enable().WithPatterns([]*fetch.RequestPattern{{RequestStage: fetch.RequestStageResponse}}),
 					chromedp.Navigate(requestURL),
 					chromedp.EvaluateAsDevTools(jsCode, &jsOutput),
+					chromedp.EvaluateAsDevTools(hrefCode, &hrefOutput),
+					chromedp.EvaluateAsDevTools(actionCode, &actionOutput),
 				)
 
 				if opts.js != "" {
 					fmt.Printf("JS (%s): %v\n", requestURL, jsOutput)
+				}
+
+				if opts.scrapeLinks {
+					// log hrefOutput
+					var jsLinks []interface{}
+					json.Unmarshal([]byte(fmt.Sprint(hrefOutput)), &jsLinks)
+					for _, element := range jsLinks {
+						subRequestUrl := fmt.Sprint(element)
+						if !isThirdPartyUrl(requestURL, subRequestUrl) && len(subRequestUrl) > 0 {
+							fmt.Printf("HREF %v\n", element)
+						}
+					}
+
+					json.Unmarshal([]byte(fmt.Sprint(actionOutput)), &jsLinks)
+					for _, element := range jsLinks {
+						subRequestUrl := fmt.Sprint(element)
+						if !isThirdPartyUrl(requestURL, subRequestUrl) && len(subRequestUrl) > 0 {
+							fmt.Printf("HREF %v\n", element)
+						}
+					}
 				}
 
 				if err != nil {
@@ -184,7 +223,7 @@ func main() {
 
 				cancel()
 			}
-			wg.Done()
+
 		}()
 	}
 	for sc.Scan() {
@@ -287,6 +326,20 @@ func saveMeta(path string, parentURL string, ev *fetch.EventRequestPaused) error
 	}
 
 	return ioutil.WriteFile(path, b.Bytes(), 0644)
+}
+
+func isThirdPartyUrl(requestURL string, subRequestUrl string) bool {
+	var domain string
+	if u, err := url.Parse(requestURL); err == nil {
+		domain = u.Hostname()
+	}
+
+	var subRequestDomain string
+	if u, err := url.Parse(subRequestUrl); err == nil {
+		subRequestDomain = u.Hostname()
+	}
+
+	return isThirdParty(domain, subRequestDomain)
 }
 
 func shouldSave(ev *fetch.EventRequestPaused, requestURL string, opts options) bool {
