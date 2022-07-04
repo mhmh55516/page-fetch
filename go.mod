@@ -1,4 +1,4 @@
-module github.com/detectify/page-fetch
+module github.com/mhmh55516/page-fetch
 
 go 1.15
 
